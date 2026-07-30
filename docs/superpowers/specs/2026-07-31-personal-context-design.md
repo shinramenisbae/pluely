@@ -79,8 +79,16 @@ document) and `personal_context_enabled` (`"true"`/`"false"`).
 `src/lib/functions/document-extract.ts` exposes
 `extractDocumentText(file: File): Promise<ExtractedDocument>`.
 
-- `.pdf` — `pdfjs-dist`, concatenating the text layer across pages. The worker is
-  bundled locally; no network access, no CDN (the app must keep working offline).
+- `.pdf` — extracted in Rust via the `pdf-extract` crate, exposed as the
+  `extract_pdf_text` Tauri command (`src-tauri/src/documents.rs`). Runs in
+  `spawn_blocking`, so a CPU-bound parse never stalls the async runtime and a
+  parser panic surfaces as an error instead of taking down the app.
+
+  Originally specified as `pdfjs-dist` in the WebView. That failed in practice:
+  pdf.js requires a web worker, and loading one over Tauri's asset protocol fails
+  in WKWebView with an unactionable minified error (`undefined is not a function`).
+  Rust avoids the whole class of worker/bundler problems, and heavy parsing
+  belongs off the WebView thread anyway. No network access either way.
 - `.txt` / `.md` — read directly as UTF-8.
 - Any other type — throw with a message naming the supported formats.
 - A PDF that yields only whitespace throws "No text found — this PDF appears to be
