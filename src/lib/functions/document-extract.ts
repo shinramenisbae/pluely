@@ -1,9 +1,23 @@
 import * as pdfjs from "pdfjs-dist";
-import workerSrc from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import PdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?worker";
 import type { ContextDocumentSource, ExtractedDocument } from "@/types";
 
-// Bundle the worker locally. Pluely must keep working offline, so no CDN.
-pdfjs.GlobalWorkerOptions.workerSrc = workerSrc;
+/**
+ * Attach the pdf.js worker on first use.
+ *
+ * Uses Vite's ?worker import rather than pointing workerSrc at a URL: Tauri
+ * serves bundled assets over a custom protocol, and a .mjs module worker fetched
+ * that way fails to instantiate. Local either way — no CDN, works offline.
+ *
+ * Done lazily because this module is re-exported through the shared lib barrel;
+ * a constructor throwing at import time would take the whole app down.
+ */
+let workerReady = false;
+function ensureWorker(): void {
+  if (workerReady) return;
+  pdfjs.GlobalWorkerOptions.workerPort = new PdfWorker();
+  workerReady = true;
+}
 
 export const SUPPORTED_EXTENSIONS = [".pdf", ".txt", ".md"];
 
@@ -16,6 +30,7 @@ const sourceTypeFor = (fileName: string): ContextDocumentSource | null => {
 };
 
 async function extractPdfText(file: File): Promise<string> {
+  ensureWorker();
   const buffer = await file.arrayBuffer();
   const loadingTask = pdfjs.getDocument({ data: buffer });
 
@@ -62,8 +77,16 @@ export async function extractDocumentText(
     );
   }
 
-  const raw =
-    sourceType === "pdf" ? await extractPdfText(file) : await file.text();
+  let raw: string;
+  try {
+    raw = sourceType === "pdf" ? await extractPdfText(file) : await file.text();
+  } catch (err) {
+    // pdf.js errors arrive minified and context-free; keep the stack for the
+    // console and give the UI something actionable.
+    console.error("Document extraction failed:", err);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Could not read ${file.name}: ${detail}`);
+  }
   const content = raw
     .replace(/[ \t]{2,}/g, " ")
     .replace(/[ \t]+\n/g, "\n")
