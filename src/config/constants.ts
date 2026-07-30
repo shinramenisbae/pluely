@@ -4,6 +4,8 @@ export const STORAGE_KEYS = {
   TRANSPARENCY: "transparency",
   SYSTEM_PROMPT: "system_prompt",
   SELECTED_SYSTEM_PROMPT_ID: "selected_system_prompt_id",
+  PERSONAL_CONTEXT_CONTENT: "personal_context_content",
+  PERSONAL_CONTEXT_ENABLED: "personal_context_enabled",
   SCREENSHOT_CONFIG: "screenshot_config",
   // add curl_ prefix because we are using curl to store the providers
   CUSTOM_AI_PROVIDERS: "curl_custom_ai_providers",
