@@ -55,7 +55,6 @@ export const PluelyApiSetup = () => {
     pluelyApiEnabled,
     setPluelyApiEnabled,
     hasActiveLicense,
-    setHasActiveLicense,
     getActiveLicenseStatus,
     setSupportsImages,
   } = useApp();
@@ -199,7 +198,8 @@ export const PluelyApiSetup = () => {
     setIsLoading(true);
     setError(null);
     setSuccess(null);
-    setHasActiveLicense(false);
+    // Fork: removing a license clears the Pluely API credentials but must not
+    // re-lock the app's feature gates.
     try {
       // Remove all license data from secure storage in one call
       await invoke("secure_storage_remove", {

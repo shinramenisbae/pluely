@@ -7,6 +7,7 @@ import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import {
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
+  RESPOND_NOW_PROMPT,
   STORAGE_KEYS,
 } from "@/config";
 import {
@@ -107,6 +108,9 @@ export function useSystemAudio() {
     selectedAudioDevices,
   } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Fork: guards against overlapping manual triggers (see runPrompt). A ref,
+  // not state, so a repeated keypress sees the current value immediately.
+  const isRespondingRef = useRef(false);
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -219,10 +223,14 @@ export function useSystemAudio() {
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
+    // Fork: listen() is async, so a fast dependency change can run the cleanup
+    // before it resolves - leaving speechUnlisten undefined and the listener
+    // permanently attached. This flag makes the cleanup win that race.
+    let cancelled = false;
 
     const setupEventListener = async () => {
       try {
-        speechUnlisten = await listen("speech-detected", async (event) => {
+        const unlisten = await listen("speech-detected", async (event) => {
           try {
             if (!capturing) return;
 
@@ -276,19 +284,28 @@ export function useSystemAudio() {
                 setLastTranscription(transcription);
                 setError("");
 
-                const effectiveSystemPrompt = useSystemPrompt
-                  ? systemPrompt || DEFAULT_SYSTEM_PROMPT
-                  : contextContent || DEFAULT_SYSTEM_PROMPT;
-
-                const previousMessages = conversation.messages.map((msg) => {
-                  return { role: msg.role, content: msg.content };
-                });
-
-                await processWithAI(
-                  transcription,
-                  effectiveSystemPrompt,
-                  previousMessages
-                );
+                // Fork: transcripts accumulate into the conversation instead of
+                // triggering a response. Previously every VAD segment fired an
+                // LLM call that aborted the one before it, so a speaker pausing
+                // mid-sentence produced a stream of cancelled half-answers.
+                // The model now runs only on the respond_now shortcut, and gets
+                // the whole conversation rather than one fragment.
+                const timestamp = Date.now();
+                setConversation((prev) => ({
+                  ...prev,
+                  messages: [
+                    {
+                      id: generateMessageId("user", timestamp),
+                      role: "user" as const,
+                      content: transcription,
+                      timestamp,
+                    },
+                    ...prev.messages,
+                  ],
+                  updatedAt: timestamp,
+                  title:
+                    prev.title || generateConversationTitle(transcription),
+                }));
               } else {
                 setError("Received empty transcription");
               }
@@ -303,6 +320,12 @@ export function useSystemAudio() {
             setIsProcessing(false);
           }
         });
+
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        speechUnlisten = unlisten;
       } catch (err) {
         setError("Failed to setup speech listener");
       }
@@ -311,14 +334,16 @@ export function useSystemAudio() {
     setupEventListener();
 
     return () => {
+      cancelled = true;
       if (speechUnlisten) speechUnlisten();
     };
-  }, [
-    capturing,
-    selectedSttProvider,
-    allSttProviders,
-    conversation.messages.length,
-  ]);
+    // Fork: conversation.messages.length was a dependency here, which turned
+    // every appended transcript into a listener re-registration. Combined with
+    // the race above, listeners accumulated and each one issued its own STT
+    // request for the same audio - producing duplicate transcripts and hammering
+    // the STT provider's rate limit. The handler only writes via the
+    // setConversation updater, so it never needed to read the conversation.
+  }, [capturing, selectedSttProvider, allSttProviders]);
 
   // Context management functions
   const saveContextSettings = useCallback(
@@ -387,45 +412,8 @@ export function useSystemAudio() {
     [quickActions, saveQuickActions]
   );
 
-  const handleQuickActionClick = async (action: string) => {
-    setError("");
-
-    const effectiveSystemPrompt = useSystemPrompt
-      ? systemPrompt || DEFAULT_SYSTEM_PROMPT
-      : contextContent || DEFAULT_SYSTEM_PROMPT;
-
-    // Include the most recent transcription in conversation history if it exists
-    let updatedMessages = [...conversation.messages];
-
-    if (lastTranscription && lastTranscription.trim()) {
-      const lastMessage = updatedMessages[updatedMessages.length - 1];
-      // Only add if it's not already the last message
-      if (!lastMessage || lastMessage.content !== lastTranscription) {
-        const timestamp = Date.now();
-        const userMessage = {
-          id: generateMessageId("user", timestamp),
-          role: "user" as const,
-          content: lastTranscription,
-          timestamp,
-        };
-        updatedMessages.push(userMessage);
-
-        // Update conversation state with the latest transcription
-        setConversation((prev) => ({
-          ...prev,
-          messages: [userMessage, ...prev.messages],
-          updatedAt: timestamp,
-          title: prev.title || generateConversationTitle(lastTranscription),
-        }));
-      }
-    }
-
-    const previousMessages = updatedMessages.map((msg) => {
-      return { role: msg.role, content: msg.content };
-    });
-
-    await processWithAI(action, effectiveSystemPrompt, previousMessages);
-  };
+  // Fork: single path for every manual trigger - quick actions and the
+  // respond_now shortcut. Defined below processWithAI, which it depends on.
 
   // Start continuous recording manually
   const startContinuousRecording = useCallback(async () => {
@@ -472,13 +460,22 @@ export function useSystemAudio() {
     async (
       transcription: string,
       prompt: string,
-      previousMessages: Message[]
+      previousMessages: Message[],
+      // Fork: manual triggers pass an instruction, not speech. Persisting it
+      // would title the conversation with the instruction and feed it back as
+      // context on every later call, so those callers opt out.
+      persistUserMessage: boolean = true
     ) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
 
-      abortControllerRef.current = new AbortController();
+      // Fork: keep a local handle. abortControllerRef is overwritten by any
+      // later call, so this is the only reliable way for this invocation to
+      // tell whether it was superseded.
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      isRespondingRef.current = true;
 
       try {
         setIsAIProcessing(true);
@@ -509,6 +506,10 @@ export function useSystemAudio() {
             history: previousMessages,
             userMessage: transcription,
             imagesBase64: [],
+            // Fork: the signal was built and aborted but never passed, so the
+            // abort above did nothing - every overlapping request ran to
+            // completion and wrote its own answer.
+            signal: controller.signal,
           })) {
             fullResponse += chunk;
             setLastAIResponse((prev) => prev + chunk);
@@ -517,37 +518,95 @@ export function useSystemAudio() {
           setError(aiError.message || "Failed to get AI response");
         }
 
-        if (fullResponse) {
+        // Fork: a superseded request must not persist its partial answer.
+        if (fullResponse && !controller.signal.aborted) {
           const timestamp = Date.now();
+          const assistantMessage = {
+            id: generateMessageId("assistant", timestamp + 1),
+            role: "assistant" as const,
+            content: fullResponse,
+            timestamp: timestamp + 1,
+          };
+          const newMessages = persistUserMessage
+            ? [
+                {
+                  id: generateMessageId("user", timestamp),
+                  role: "user" as const,
+                  content: transcription,
+                  timestamp,
+                },
+                assistantMessage,
+              ]
+            : [assistantMessage];
+
           setConversation((prev) => ({
             ...prev,
-            messages: [
-              {
-                id: generateMessageId("user", timestamp),
-                role: "user" as const,
-                content: transcription,
-                timestamp,
-              },
-              {
-                id: generateMessageId("assistant", timestamp + 1),
-                role: "assistant" as const,
-                content: fullResponse,
-                timestamp: timestamp + 1,
-              },
-              ...prev.messages,
-            ],
+            messages: [...newMessages, ...prev.messages],
             updatedAt: timestamp,
-            title: prev.title || generateConversationTitle(transcription),
+            title: persistUserMessage
+              ? prev.title || generateConversationTitle(transcription)
+              : prev.title,
           }));
         }
       } catch (err) {
         setError("Failed to get AI response");
       } finally {
         setIsAIProcessing(false);
+        isRespondingRef.current = false;
         // No auto-restart - user manually controls when to start next recording
       }
     },
     [selectedAIProvider, allAiProviders, conversation.messages]
+  );
+
+  // Fork: single path for every manual trigger - quick actions and the
+  // respond_now shortcut. Transcripts already land in the conversation as they
+  // arrive, so this only has to replay them with the requested instruction.
+  const runPrompt = useCallback(
+    async (prompt: string) => {
+      // Fork: a global shortcut repeats while held, and each repeat used to
+      // start another answer. One request at a time - later triggers are
+      // ignored until the current one finishes rather than stacking.
+      if (isRespondingRef.current) {
+        return;
+      }
+      setError("");
+
+      const effectiveSystemPrompt = useSystemPrompt
+        ? systemPrompt || DEFAULT_SYSTEM_PROMPT
+        : contextContent || DEFAULT_SYSTEM_PROMPT;
+
+      // conversation.messages is stored newest-first, but buildDynamicMessages
+      // splices history into the request as-is - without this reverse the model
+      // reads the conversation backwards.
+      const previousMessages = [...conversation.messages]
+        .reverse()
+        .map((msg) => ({ role: msg.role, content: msg.content }));
+
+      await processWithAI(
+        prompt,
+        effectiveSystemPrompt,
+        previousMessages,
+        false
+      );
+    },
+    [
+      useSystemPrompt,
+      systemPrompt,
+      contextContent,
+      conversation.messages,
+      processWithAI,
+    ]
+  );
+
+  const handleQuickActionClick = async (action: string) => {
+    await runPrompt(action);
+  };
+
+  // Fork: answer on demand using everything transcribed so far.
+  const requestResponse = useCallback(
+    () => runPrompt(RESPOND_NOW_PROMPT),
+    [runPrompt]
   );
 
   const startCapture = useCallback(async () => {
@@ -707,6 +766,25 @@ export function useSystemAudio() {
       }
     });
   }, [startCapture, stopCapture]);
+
+  // Fork: respond_now is dispatched by the Rust custom_action branch, so it
+  // needs no native handler - only a callback registered against its id.
+  // requestResponse changes identity on every new message, so it is held in a
+  // ref and the callback registered once - re-registering per message would
+  // repeat the churn that broke the speech listener.
+  const requestResponseRef = useRef(requestResponse);
+  useEffect(() => {
+    requestResponseRef.current = requestResponse;
+  }, [requestResponse]);
+
+  useEffect(() => {
+    globalShortcuts.registerCustomShortcutCallback("respond_now", () => {
+      void requestResponseRef.current();
+    });
+    return () => {
+      globalShortcuts.unregisterCustomShortcutCallback("respond_now");
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -912,6 +990,8 @@ export function useSystemAudio() {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    // Fork: manual "answer now" trigger for Listen mode
+    requestResponse,
     // VAD configuration
     vadConfig,
     updateVadConfiguration,

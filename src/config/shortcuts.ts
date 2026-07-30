@@ -71,4 +71,15 @@ export const DEFAULT_SHORTCUT_ACTIONS: ShortcutAction[] = [
       linux: "ctrl+shift+s",
     },
   },
+  {
+    id: "respond_now",
+    name: "Respond Now",
+    description:
+      "Answer using everything transcribed so far (Listen mode never answers on its own)",
+    defaultKey: {
+      macos: "cmd+shift+enter",
+      windows: "ctrl+shift+enter",
+      linux: "ctrl+shift+enter",
+    },
+  },
 ];
