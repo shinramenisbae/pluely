@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pluely",
   "version": "0.1.9",
-  "identifier": "com.shinramenisbae.pluely-dev",
+  "identifier": "com.shinramenisbae.pluely-dev2",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1430",
