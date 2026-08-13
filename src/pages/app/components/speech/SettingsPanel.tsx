@@ -118,6 +118,7 @@ export const SettingsPanel = ({
       pre_speech_chunks: 12,
       noise_gate_threshold: 0.003,
       max_recording_duration_secs: 180,
+      auto_respond_silence_ms: 1500,
     };
     onUpdateVadConfig(defaultConfig);
   };
@@ -343,6 +344,35 @@ export const SettingsPanel = ({
                       />
                       <p className="text-[10px] text-muted-foreground">
                         How long to wait after speech stops
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium flex items-center justify-between">
+                        <span>Response Delay</span>
+                        <span className="text-muted-foreground font-normal">
+                          {(
+                            (vadConfig.auto_respond_silence_ms ?? 1500) / 1000
+                          ).toFixed(1)}
+                          s
+                        </span>
+                      </Label>
+                      <Slider
+                        value={[vadConfig.auto_respond_silence_ms ?? 1500]}
+                        onValueChange={([value]) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            auto_respond_silence_ms: Math.round(value),
+                          })
+                        }
+                        min={500}
+                        max={8000}
+                        step={250}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        Quiet time before answering on its own. Raise it if
+                        answers cut in while the speaker is still talking.
                       </p>
                     </div>
                   </>

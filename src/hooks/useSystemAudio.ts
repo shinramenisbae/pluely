@@ -33,6 +33,10 @@ export interface VadConfig {
   pre_speech_chunks: number;
   noise_gate_threshold: number;
   max_recording_duration_secs: number;
+  // Fork: how long Listen mode waits after the last transcript before
+  // answering on its own. Frontend-only - the Rust VadConfig does not declare
+  // it and serde ignores unknown fields, so it rides along harmlessly.
+  auto_respond_silence_ms: number;
 }
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
@@ -46,6 +50,7 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   pre_speech_chunks: 12, // ~0.27s - enough to catch word start
   noise_gate_threshold: 0.003, // Stronger noise filtering
   max_recording_duration_secs: 180, // 3 minutes default
+  auto_respond_silence_ms: AUTO_RESPOND_SILENCE_MS,
 };
 
 // Chat message interface (reusing from useCompletion)
@@ -118,6 +123,7 @@ export function useSystemAudio() {
   // already streaming - that answer is never aborted, the next one runs after.
   const autoRespondTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingAutoRespondRef = useRef(false);
+  const autoRespondDelayRef = useRef(AUTO_RESPOND_SILENCE_MS);
   // Declared here rather than beside requestResponse: the speech listener is
   // defined earlier in this hook and reaches it through the ref.
   const requestResponseRef = useRef<() => void>(() => {});
@@ -132,6 +138,9 @@ export function useSystemAudio() {
     if (autoRespondTimerRef.current) {
       clearTimeout(autoRespondTimerRef.current);
     }
+    // Read through a ref: this callback must keep a stable identity (the
+    // speech listener depends on it), so it cannot close over vadConfig.
+    const delay = autoRespondDelayRef.current;
     autoRespondTimerRef.current = setTimeout(() => {
       autoRespondTimerRef.current = null;
       if (isRespondingRef.current) {
@@ -141,7 +150,7 @@ export function useSystemAudio() {
         return;
       }
       requestResponseRef.current();
-    }, AUTO_RESPOND_SILENCE_MS);
+    }, delay);
   }, []);
 
   const cancelAutoResponse = useCallback(() => {
@@ -151,6 +160,13 @@ export function useSystemAudio() {
     }
     pendingAutoRespondRef.current = false;
   }, []);
+
+  // Keep the delay the scheduler reads in step with the setting. A timer
+  // already armed keeps its original delay; the next one uses the new value.
+  useEffect(() => {
+    autoRespondDelayRef.current =
+      vadConfig.auto_respond_silence_ms ?? AUTO_RESPOND_SILENCE_MS;
+  }, [vadConfig.auto_respond_silence_ms]);
 
   // Load context settings and VAD config from localStorage on mount
   useEffect(() => {
@@ -172,7 +188,11 @@ export function useSystemAudio() {
     if (savedVadConfig) {
       try {
         const parsed = JSON.parse(savedVadConfig);
-        setVadConfig(parsed);
+        // Fork: merge over the defaults rather than replacing them. A config
+        // saved before a field existed would otherwise load it as undefined -
+        // for auto_respond_silence_ms that means a zero-delay timer, i.e. the
+        // per-segment answering this setting exists to prevent.
+        setVadConfig({ ...DEFAULT_VAD_CONFIG, ...parsed });
       } catch (error) {
         console.error("Failed to load VAD config:", error);
       }
