@@ -426,6 +426,14 @@ export function useSystemAudio() {
           ? selectedAudioDevices.output.id
           : null;
 
+      // Fork: the Rust side refuses to start while a capture task is still
+      // registered ("Capture already running"), and a session that ended by
+      // any path other than ignoreContinuousRecording - a prior VAD session,
+      // an aborted send, a reload mid-recording - leaves one behind. The VAD
+      // path in startCapture already clears it first; manual start did not,
+      // so it failed until the app was restarted. stop is idempotent.
+      await invoke<string>("stop_system_audio_capture");
+
       // Start a new continuous recording session
       await invoke<string>("start_system_audio_capture", {
         vadConfig: vadConfig,
