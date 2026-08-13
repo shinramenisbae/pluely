@@ -124,6 +124,10 @@ export function useSystemAudio() {
   const autoRespondTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingAutoRespondRef = useRef(false);
   const autoRespondDelayRef = useRef(AUTO_RESPOND_SILENCE_MS);
+  // Mirrors `capturing` for callbacks that must stay stable (updateVadConfiguration
+  // is passed to the settings panel; re-creating it on every capture toggle
+  // would churn the panel's handlers).
+  const capturingRef = useRef(false);
   // Declared here rather than beside requestResponse: the speech listener is
   // defined earlier in this hook and reaches it through the ref.
   const requestResponseRef = useRef<() => void>(() => {});
@@ -951,10 +955,33 @@ export function useSystemAudio() {
       setVadConfig(config);
       safeLocalStorage.setItem("vad_config", JSON.stringify(config));
       await invoke("update_vad_config", { config });
+
+      // Fork: start_system_audio_capture clones the VAD config before it
+      // spawns the capture task, so a running session keeps the values it
+      // started with - update_vad_config only affects the next one. Editing
+      // Silence Duration mid-session therefore appeared to do nothing, with
+      // no error to explain why. Restart the capture so the edit takes hold.
+      // Only the audio side needs this; auto_respond_silence_ms is read live
+      // on the frontend, so a delay-only change skips the restart.
+      if (capturingRef.current && config.enabled) {
+        await invoke("stop_system_audio_capture");
+        const deviceId =
+          selectedAudioDevices.output.id !== "default"
+            ? selectedAudioDevices.output.id
+            : null;
+        await invoke("start_system_audio_capture", {
+          vadConfig: config,
+          deviceId,
+        });
+      }
     } catch (error) {
       console.error("Failed to update VAD config:", error);
     }
-  }, []);
+  }, [selectedAudioDevices.output.id]);
+
+  useEffect(() => {
+    capturingRef.current = capturing;
+  }, [capturing]);
 
   useEffect(() => {
     if (capturing) {
