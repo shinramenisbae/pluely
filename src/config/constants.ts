@@ -38,6 +38,11 @@ export const DEFAULT_SYSTEM_PROMPT =
 // lower it for snappier replies.
 export const AUTO_RESPOND_SILENCE_MS = 1500;
 
+// Fork: how much of the Listen-mode transcript accompanies an answer, in
+// minutes. A long call is mostly background; replaying all of it costs tokens
+// and buries the question the user actually wants answered. 0 = no limit.
+export const DEFAULT_CONTEXT_WINDOW_MINUTES = 5;
+
 // Fork: instruction sent when the user asks Listen mode for an answer. The
 // transcript is already in the conversation history, so this only has to say
 // what to do with it.

@@ -6,6 +6,7 @@ import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import {
   AUTO_RESPOND_SILENCE_MS,
+  DEFAULT_CONTEXT_WINDOW_MINUTES,
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
   RESPOND_NOW_PROMPT,
@@ -37,6 +38,9 @@ export interface VadConfig {
   // answering on its own. Frontend-only - the Rust VadConfig does not declare
   // it and serde ignores unknown fields, so it rides along harmlessly.
   auto_respond_silence_ms: number;
+  // Fork: how much of the transcript to send with an answer, in minutes.
+  // 0 means the whole conversation. Also frontend-only.
+  context_window_minutes: number;
 }
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
@@ -51,6 +55,7 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   noise_gate_threshold: 0.003, // Stronger noise filtering
   max_recording_duration_secs: 180, // 3 minutes default
   auto_respond_silence_ms: AUTO_RESPOND_SILENCE_MS,
+  context_window_minutes: DEFAULT_CONTEXT_WINDOW_MINUTES,
 };
 
 // Chat message interface (reusing from useCompletion)
@@ -668,10 +673,21 @@ export function useSystemAudio() {
         ? systemPrompt || DEFAULT_SYSTEM_PROMPT
         : contextContent || DEFAULT_SYSTEM_PROMPT;
 
+      // Fork: bound the transcript sent to the model. Listen mode can run for
+      // an hour, and replaying all of it on every answer is expensive, slow,
+      // and actively worse - the question the user wants answered is a few
+      // lines at the end, buried under everything said before it. Keep only
+      // what was said in the last context_window_minutes. 0 means no limit.
+      const windowMinutes =
+        vadConfig.context_window_minutes ?? DEFAULT_CONTEXT_WINDOW_MINUTES;
+      const cutoff =
+        windowMinutes > 0 ? Date.now() - windowMinutes * 60_000 : 0;
+
       // conversation.messages is stored newest-first, but buildDynamicMessages
       // splices history into the request as-is - without this reverse the model
       // reads the conversation backwards.
       const previousMessages = [...conversation.messages]
+        .filter((msg) => msg.timestamp >= cutoff)
         .reverse()
         .map((msg) => ({ role: msg.role, content: msg.content }));
 
@@ -683,6 +699,7 @@ export function useSystemAudio() {
       );
     },
     [
+      vadConfig.context_window_minutes,
       useSystemPrompt,
       systemPrompt,
       contextContent,
