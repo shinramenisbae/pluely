@@ -131,7 +131,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [customizable, setCustomizable] = useState<CustomizableState>(
     DEFAULT_CUSTOMIZABLE_STATE
   );
-  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(false);
+  // Fork: license gating removed. This flag feeds every gate in the app
+  // (overlay dragging, Selection Mode capture, menu items, and the Rust-side
+  // move_window shortcuts via syncLicenseState), so pinning it true unlocks
+  // all of them from one place.
+  const [hasActiveLicense, setHasActiveLicense] = useState<boolean>(true);
   const [supportsImages, setSupportsImagesState] = useState<boolean>(() => {
     const stored = safeLocalStorage.getItem(STORAGE_KEYS.SUPPORTS_IMAGES);
     return stored === null ? true : stored === "true";
@@ -151,7 +155,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const getActiveLicenseStatus = async () => {
     const response: { is_active: boolean; is_dev_license: boolean } =
       await invoke("validate_license_api");
-    setHasActiveLicense(response.is_active);
+    // Fork: deliberately not calling setHasActiveLicense here - a missing or
+    // expired license must not re-lock the gates.
 
     if (response?.is_dev_license) {
       setPluelyApiEnabled(false);

@@ -17,5 +17,12 @@ pub fn migrations() -> Vec<Migration> {
             sql: include_str!("migrations/chat-history.sql"),
             kind: MigrationKind::Up,
         },
+        // Migration 3: Create context_documents table (personal context)
+        Migration {
+            version: 3,
+            description: "create_context_documents_table",
+            sql: include_str!("migrations/context-documents.sql"),
+            kind: MigrationKind::Up,
+        },
     ]
 }

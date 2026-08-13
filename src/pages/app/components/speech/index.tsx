@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import {
   Button,
+  Input,
   Popover,
   PopoverTrigger,
   PopoverContent,
@@ -13,6 +14,8 @@ import {
   AudioLinesIcon,
   CameraIcon,
   PlusIcon,
+  SendIcon,
+  SparklesIcon,
   XIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -55,6 +58,8 @@ export const SystemAudio = (props: useSystemAudioType) => {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    askAboutTranscript,
+    requestResponse,
     vadConfig,
     updateVadConfiguration,
     isRecordingInContinuousMode,
@@ -70,12 +75,19 @@ export const SystemAudio = (props: useSystemAudioType) => {
   // View mode toggle
   const [conversationMode, setConversationMode] = useState(false);
 
+  // Free-text question about the transcript (Listen mode)
+  const [askInput, setAskInput] = useState("");
+
   // Screenshot state
   const [screenshotImage, setScreenshotImage] = useState<string | null>(null);
   const [isCapturingScreenshot, setIsCapturingScreenshot] = useState(false);
 
   const isVadMode = vadConfig.enabled;
   const hasResponse = lastAIResponse || isAIProcessing;
+  // Something has been said that the model could answer. Transcripts land in
+  // the conversation as user messages, so that - not lastTranscription, which
+  // only holds the most recent segment - is the real signal.
+  const hasTranscript = conversation.messages.some((m) => m.role === "user");
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -373,6 +385,69 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 )}
               </div>
             </ScrollArea>
+
+            {/* Fork: answer now, without waiting out the response delay. The
+                keyboard shortcut (respond_now) did this from the start, but an
+                invisible shortcut is not a discoverable feature. Shown whenever
+                something has been transcribed and no answer is in flight. */}
+            {!setupRequired && capturing && (
+              <div className="flex-shrink-0 border-t border-border/50 p-2 space-y-2">
+                {/* Needs something to answer; the input below does not. */}
+                {hasTranscript && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="w-full gap-2"
+                    onClick={requestResponse}
+                    disabled={isAIProcessing || isProcessing}
+                    title="Answer using everything transcribed so far (Ctrl+Shift+Enter)"
+                  >
+                    <SparklesIcon className="size-3.5" />
+                    {isAIProcessing ? "Responding..." : "Respond now"}
+                  </Button>
+                )}
+
+                {/* Fork: ask about the transcript in your own words. The quick
+                    actions already proved the path - they hand a string to
+                    runPrompt, which replays the transcript as history - but
+                    only from a fixed preset list. This is the same call with
+                    whatever the user types. */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const question = askInput.trim();
+                    if (!question || isAIProcessing || isProcessing) return;
+                    setAskInput("");
+                    askAboutTranscript(question);
+                  }}
+                  className="flex items-center gap-1.5"
+                >
+                  <Input
+                    value={askInput}
+                    onChange={(e) => setAskInput(e.target.value)}
+                    placeholder={
+                      hasTranscript
+                        ? "Ask about the transcript..."
+                        : "Brief the AI before you start..."
+                    }
+                    className="h-8 text-xs"
+                    disabled={isAIProcessing || isProcessing}
+                  />
+                  <Button
+                    type="submit"
+                    size="icon"
+                    variant="ghost"
+                    className="h-8 w-8 shrink-0"
+                    disabled={
+                      !askInput.trim() || isAIProcessing || isProcessing
+                    }
+                    title="Ask this question using the transcript as context"
+                  >
+                    <SendIcon className="size-3.5" />
+                  </Button>
+                </form>
+              </div>
+            )}
 
             {/* Quick Actions */}
             {!setupRequired && hasResponse && (

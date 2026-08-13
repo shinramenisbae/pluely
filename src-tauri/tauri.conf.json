@@ -2,10 +2,10 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Pluely",
   "version": "0.1.9",
-  "identifier": "com.srikanthnani.pluely",
+  "identifier": "com.shinramenisbae.pluely-dev2",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -34,7 +34,7 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -51,7 +51,9 @@
       "preload": ["sqlite:pluely.db"]
     },
     "updater": {
-      "endpoints": ["https://pluely.com/api/update"],
+      "endpoints": [
+        "https://github.com/shinramenisbae/pluely/releases/latest/download/latest.json"
+      ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY2RDJBNUFFM0ZCREEyQjEKUldTeG9yMC9ycVhTWmlBRkovV2N5L3RudDhTTHFzM3QxSkF0R0doRGtvSUJKWktpdGp4cWRhcmcK",
       "windows": {
         "installMode": "passive"

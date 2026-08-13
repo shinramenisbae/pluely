@@ -12,7 +12,12 @@ import { listen } from "@tauri-apps/api/event";
 import curl2Json from "@bany/curl-to-json";
 import { shouldUsePluelyAPI } from "./pluely.api";
 import { CHUNK_POLL_INTERVAL_MS } from "../chat-constants";
-import { getResponseSettings, RESPONSE_LENGTHS, LANGUAGES } from "@/lib";
+import {
+  getResponseSettings,
+  RESPONSE_LENGTHS,
+  LANGUAGES,
+  getPersonalContext,
+} from "@/lib";
 import { MARKDOWN_FORMATTING_INSTRUCTIONS } from "@/config/constants";
 
 function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
@@ -21,6 +26,15 @@ function buildEnhancedSystemPrompt(baseSystemPrompt?: string): string {
 
   if (baseSystemPrompt) {
     prompts.push(baseSystemPrompt);
+  }
+
+  // Personal context (e.g. the user's resume). Delimited so the model reads it as
+  // facts about the user rather than as instructions.
+  const personalContext = getPersonalContext();
+  if (personalContext.trim()) {
+    prompts.push(
+      `<personal_context>\nThe following is the user's own background. When the user is asked a question about their experience, history, or qualifications, answer using these facts. Do not invent details that are not present here.\n\n${personalContext.trim()}\n</personal_context>`
+    );
   }
 
   const lengthOption = RESPONSE_LENGTHS.find(

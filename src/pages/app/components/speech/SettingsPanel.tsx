@@ -118,6 +118,8 @@ export const SettingsPanel = ({
       pre_speech_chunks: 12,
       noise_gate_threshold: 0.003,
       max_recording_duration_secs: 180,
+      auto_respond_silence_ms: 1500,
+      context_window_minutes: 5,
     };
     onUpdateVadConfig(defaultConfig);
   };
@@ -343,6 +345,68 @@ export const SettingsPanel = ({
                       />
                       <p className="text-[10px] text-muted-foreground">
                         How long to wait after speech stops
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium flex items-center justify-between">
+                        <span>Response Delay</span>
+                        <span className="text-muted-foreground font-normal">
+                          {(vadConfig.auto_respond_silence_ms ?? 1500) === 0
+                            ? "Off - manual"
+                            : `${(
+                                (vadConfig.auto_respond_silence_ms ?? 1500) /
+                                1000
+                              ).toFixed(1)}s`}
+                        </span>
+                      </Label>
+                      <Slider
+                        value={[vadConfig.auto_respond_silence_ms ?? 1500]}
+                        onValueChange={([value]) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            auto_respond_silence_ms: Math.round(value),
+                          })
+                        }
+                        min={0}
+                        max={8000}
+                        step={250}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        {(vadConfig.auto_respond_silence_ms ?? 1500) === 0
+                          ? "Never answers on its own. Speech keeps accumulating; press Respond now (Ctrl+Shift+Enter) to answer all of it at once."
+                          : "Quiet time before answering on its own. Slide to 0 for manual-only if answers keep cutting in mid-question."}
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs font-medium flex items-center justify-between">
+                        <span>Auto-answer Context</span>
+                        <span className="text-muted-foreground font-normal">
+                          {(vadConfig.context_window_minutes ?? 5) === 0
+                            ? "Whole conversation"
+                            : `Last ${vadConfig.context_window_minutes ?? 5} min`}
+                        </span>
+                      </Label>
+                      <Slider
+                        value={[vadConfig.context_window_minutes ?? 5]}
+                        onValueChange={([value]) =>
+                          onUpdateVadConfig({
+                            ...vadConfig,
+                            context_window_minutes: Math.round(value),
+                          })
+                        }
+                        min={0}
+                        max={30}
+                        step={1}
+                        className="w-full"
+                      />
+                      <p className="text-[10px] text-muted-foreground">
+                        Transcript sent with Respond now, quick actions and
+                        auto-answers, so they stay focused on what was just
+                        said. Questions you type always use the whole
+                        transcript.
                       </p>
                     </div>
                   </>

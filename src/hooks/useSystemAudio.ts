@@ -5,8 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import {
+  AUTO_RESPOND_SILENCE_MS,
+  DEFAULT_CONTEXT_WINDOW_MINUTES,
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
+  RESPOND_NOW_PROMPT,
   STORAGE_KEYS,
 } from "@/config";
 import {
@@ -31,6 +34,13 @@ export interface VadConfig {
   pre_speech_chunks: number;
   noise_gate_threshold: number;
   max_recording_duration_secs: number;
+  // Fork: how long Listen mode waits after the last transcript before
+  // answering on its own. Frontend-only - the Rust VadConfig does not declare
+  // it and serde ignores unknown fields, so it rides along harmlessly.
+  auto_respond_silence_ms: number;
+  // Fork: how much of the transcript to send with an answer, in minutes.
+  // 0 means the whole conversation. Also frontend-only.
+  context_window_minutes: number;
 }
 
 // OPTIMIZED VAD defaults - matches backend exactly for perfect performance
@@ -44,6 +54,8 @@ const DEFAULT_VAD_CONFIG: VadConfig = {
   pre_speech_chunks: 12, // ~0.27s - enough to catch word start
   noise_gate_threshold: 0.003, // Stronger noise filtering
   max_recording_duration_secs: 180, // 3 minutes default
+  auto_respond_silence_ms: AUTO_RESPOND_SILENCE_MS,
+  context_window_minutes: DEFAULT_CONTEXT_WINDOW_MINUTES,
 };
 
 // Chat message interface (reusing from useCompletion)
@@ -52,6 +64,13 @@ interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  // Fork: set on turns the user deliberately typed, and on the answers to
+  // them. The auto-answer context window trims by age, which is right for
+  // speech - a transcript line from twenty minutes ago is usually noise - but
+  // wrong for these: a briefing ("this is a backend interview, keep answers
+  // short") does not stop applying because it got old. Pinned messages are
+  // exempt from the window and always sent.
+  pinned?: boolean;
 }
 
 // Conversation interface (reusing from useCompletion)
@@ -107,9 +126,77 @@ export function useSystemAudio() {
     selectedAudioDevices,
   } = useApp();
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Fork: guards against overlapping manual triggers (see runPrompt). A ref,
+  // not state, so a repeated keypress sees the current value immediately.
+  const isRespondingRef = useRef(false);
+  // Fork: auto-answer scheduling. Each transcript pushes the timer back, so the
+  // model runs once the speaker actually stops rather than once per segment.
+  // pendingAutoRespondRef records a pause that landed while an answer was
+  // already streaming - that answer is never aborted, the next one runs after.
+  const autoRespondTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingAutoRespondRef = useRef(false);
+  const autoRespondDelayRef = useRef(AUTO_RESPOND_SILENCE_MS);
+  // Fork: speech is being captured or transcribed right now, so the newest
+  // utterance is not in the conversation yet. Used to defer a manual answer
+  // until it lands rather than answering without it.
+  const speechInFlightRef = useRef(false);
+  const sttInFlightRef = useRef(false);
+  const pendingManualRespondRef = useRef(false);
+  // Mirrors `capturing` for callbacks that must stay stable (updateVadConfiguration
+  // is passed to the settings panel; re-creating it on every capture toggle
+  // would churn the panel's handlers).
+  const capturingRef = useRef(false);
+  // Declared here rather than beside requestResponse: the speech listener is
+  // defined earlier in this hook and reaches it through the ref.
+  const requestResponseRef = useRef<() => void>(() => {});
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  // Fork: (re)arm the auto-answer timer. Called on every transcript, so a
+  // speaker who keeps going keeps pushing the answer back. Stable identity -
+  // it only touches refs - so the speech listener never re-registers for it.
+  const scheduleAutoResponse = useCallback(() => {
+    if (autoRespondTimerRef.current) {
+      clearTimeout(autoRespondTimerRef.current);
+    }
+    // Read through a ref: this callback must keep a stable identity (the
+    // speech listener depends on it), so it cannot close over vadConfig.
+    const delay = autoRespondDelayRef.current;
+    // Fork: 0 means "never answer on its own". Transcripts still accumulate,
+    // and Respond now (or Ctrl+Shift+Enter) answers against all of them - the
+    // whole conversation is sent as history, so speech split across several
+    // segments is still answered as one question.
+    if (delay <= 0) {
+      return;
+    }
+    autoRespondTimerRef.current = setTimeout(() => {
+      autoRespondTimerRef.current = null;
+      if (isRespondingRef.current) {
+        // An answer is still streaming. Don't abort it - queue instead, and
+        // processWithAI will pick this up when it finishes.
+        pendingAutoRespondRef.current = true;
+        return;
+      }
+      requestResponseRef.current();
+    }, delay);
+  }, []);
+
+  const cancelAutoResponse = useCallback(() => {
+    if (autoRespondTimerRef.current) {
+      clearTimeout(autoRespondTimerRef.current);
+      autoRespondTimerRef.current = null;
+    }
+    pendingAutoRespondRef.current = false;
+    pendingManualRespondRef.current = false;
+  }, []);
+
+  // Keep the delay the scheduler reads in step with the setting. A timer
+  // already armed keeps its original delay; the next one uses the new value.
+  useEffect(() => {
+    autoRespondDelayRef.current =
+      vadConfig.auto_respond_silence_ms ?? AUTO_RESPOND_SILENCE_MS;
+  }, [vadConfig.auto_respond_silence_ms]);
 
   // Load context settings and VAD config from localStorage on mount
   useEffect(() => {
@@ -131,7 +218,11 @@ export function useSystemAudio() {
     if (savedVadConfig) {
       try {
         const parsed = JSON.parse(savedVadConfig);
-        setVadConfig(parsed);
+        // Fork: merge over the defaults rather than replacing them. A config
+        // saved before a field existed would otherwise load it as undefined -
+        // for auto_respond_silence_ms that means a zero-delay timer, i.e. the
+        // per-segment answering this setting exists to prevent.
+        setVadConfig({ ...DEFAULT_VAD_CONFIG, ...parsed });
       } catch (error) {
         console.error("Failed to load VAD config:", error);
       }
@@ -163,6 +254,7 @@ export function useSystemAudio() {
     let stopUnlisten: (() => void) | undefined;
     let errorUnlisten: (() => void) | undefined;
     let discardedUnlisten: (() => void) | undefined;
+    let speechStartUnlisten: (() => void) | undefined;
 
     const setupContinuousListeners = async () => {
       try {
@@ -194,10 +286,26 @@ export function useSystemAudio() {
           setIsRecordingInContinuousMode(false);
         });
 
+        // Fork: speech has started but the segment has not closed yet. The VAD
+        // only closes it after a full Silence Duration of quiet, and STT runs
+        // after that - so for several seconds after the speaker stops, what
+        // they just said is not in the conversation yet. Respond now pressed in
+        // that gap used to answer without it, which read as answering the
+        // previous question and needing a second press.
+        speechStartUnlisten = await listen("speech-start", () => {
+          speechInFlightRef.current = true;
+        });
+
         // Speech discarded (too short)
         discardedUnlisten = await listen("speech-discarded", (event) => {
           const reason = event.payload as string;
           console.log("Speech discarded:", reason);
+          // Nothing will be transcribed, so a waiting request must not hang.
+          speechInFlightRef.current = false;
+          if (pendingManualRespondRef.current) {
+            pendingManualRespondRef.current = false;
+            requestResponseRef.current();
+          }
           // Don't show error - this is expected behavior
         });
       } catch (err) {
@@ -213,16 +321,21 @@ export function useSystemAudio() {
       if (stopUnlisten) stopUnlisten();
       if (errorUnlisten) errorUnlisten();
       if (discardedUnlisten) discardedUnlisten();
+      if (speechStartUnlisten) speechStartUnlisten();
     };
   }, []);
 
   // Handle single speech detection event (both VAD and continuous modes)
   useEffect(() => {
     let speechUnlisten: (() => void) | undefined;
+    // Fork: listen() is async, so a fast dependency change can run the cleanup
+    // before it resolves - leaving speechUnlisten undefined and the listener
+    // permanently attached. This flag makes the cleanup win that race.
+    let cancelled = false;
 
     const setupEventListener = async () => {
       try {
-        speechUnlisten = await listen("speech-detected", async (event) => {
+        const unlisten = await listen("speech-detected", async (event) => {
           try {
             if (!capturing) return;
 
@@ -251,6 +364,7 @@ export function useSystemAudio() {
             }
 
             setIsProcessing(true);
+            sttInFlightRef.current = true;
 
             // Add timeout wrapper for STT request (30 seconds)
             const sttPromise = fetchSTT({
@@ -276,19 +390,42 @@ export function useSystemAudio() {
                 setLastTranscription(transcription);
                 setError("");
 
-                const effectiveSystemPrompt = useSystemPrompt
-                  ? systemPrompt || DEFAULT_SYSTEM_PROMPT
-                  : contextContent || DEFAULT_SYSTEM_PROMPT;
+                // Fork: transcripts accumulate into the conversation instead of
+                // triggering a response. Previously every VAD segment fired an
+                // LLM call that aborted the one before it, so a speaker pausing
+                // mid-sentence produced a stream of cancelled half-answers.
+                // The model now runs only on the respond_now shortcut, and gets
+                // the whole conversation rather than one fragment.
+                const timestamp = Date.now();
+                setConversation((prev) => ({
+                  ...prev,
+                  messages: [
+                    {
+                      id: generateMessageId("user", timestamp),
+                      role: "user" as const,
+                      content: transcription,
+                      timestamp,
+                    },
+                    ...prev.messages,
+                  ],
+                  updatedAt: timestamp,
+                  title:
+                    prev.title || generateConversationTitle(transcription),
+                }));
 
-                const previousMessages = conversation.messages.map((msg) => {
-                  return { role: msg.role, content: msg.content };
-                });
+                // Fork: answer once the speaker pauses. Re-armed per segment,
+                // so a multi-sentence question is answered as one question.
+                scheduleAutoResponse();
 
-                await processWithAI(
-                  transcription,
-                  effectiveSystemPrompt,
-                  previousMessages
-                );
+                // Fork: a manual answer was requested while this utterance was
+                // still being captured or transcribed. It is in the
+                // conversation now, so run the answer the user actually asked
+                // for - the one that includes what was just said.
+                if (pendingManualRespondRef.current) {
+                  pendingManualRespondRef.current = false;
+                  cancelAutoResponse();
+                  requestResponseRef.current();
+                }
               } else {
                 setError("Received empty transcription");
               }
@@ -301,8 +438,22 @@ export function useSystemAudio() {
             setError("Failed to process speech");
           } finally {
             setIsProcessing(false);
+            sttInFlightRef.current = false;
+            speechInFlightRef.current = false;
+            // Transcription failed or produced nothing, so the release above
+            // never ran. Don't leave a requested answer waiting forever.
+            if (pendingManualRespondRef.current) {
+              pendingManualRespondRef.current = false;
+              requestResponseRef.current();
+            }
           }
         });
+
+        if (cancelled) {
+          unlisten();
+          return;
+        }
+        speechUnlisten = unlisten;
       } catch (err) {
         setError("Failed to setup speech listener");
       }
@@ -311,14 +462,16 @@ export function useSystemAudio() {
     setupEventListener();
 
     return () => {
+      cancelled = true;
       if (speechUnlisten) speechUnlisten();
     };
-  }, [
-    capturing,
-    selectedSttProvider,
-    allSttProviders,
-    conversation.messages.length,
-  ]);
+    // Fork: conversation.messages.length was a dependency here, which turned
+    // every appended transcript into a listener re-registration. Combined with
+    // the race above, listeners accumulated and each one issued its own STT
+    // request for the same audio - producing duplicate transcripts and hammering
+    // the STT provider's rate limit. The handler only writes via the
+    // setConversation updater, so it never needed to read the conversation.
+  }, [capturing, selectedSttProvider, allSttProviders, scheduleAutoResponse]);
 
   // Context management functions
   const saveContextSettings = useCallback(
@@ -387,45 +540,8 @@ export function useSystemAudio() {
     [quickActions, saveQuickActions]
   );
 
-  const handleQuickActionClick = async (action: string) => {
-    setError("");
-
-    const effectiveSystemPrompt = useSystemPrompt
-      ? systemPrompt || DEFAULT_SYSTEM_PROMPT
-      : contextContent || DEFAULT_SYSTEM_PROMPT;
-
-    // Include the most recent transcription in conversation history if it exists
-    let updatedMessages = [...conversation.messages];
-
-    if (lastTranscription && lastTranscription.trim()) {
-      const lastMessage = updatedMessages[updatedMessages.length - 1];
-      // Only add if it's not already the last message
-      if (!lastMessage || lastMessage.content !== lastTranscription) {
-        const timestamp = Date.now();
-        const userMessage = {
-          id: generateMessageId("user", timestamp),
-          role: "user" as const,
-          content: lastTranscription,
-          timestamp,
-        };
-        updatedMessages.push(userMessage);
-
-        // Update conversation state with the latest transcription
-        setConversation((prev) => ({
-          ...prev,
-          messages: [userMessage, ...prev.messages],
-          updatedAt: timestamp,
-          title: prev.title || generateConversationTitle(lastTranscription),
-        }));
-      }
-    }
-
-    const previousMessages = updatedMessages.map((msg) => {
-      return { role: msg.role, content: msg.content };
-    });
-
-    await processWithAI(action, effectiveSystemPrompt, previousMessages);
-  };
+  // Fork: single path for every manual trigger - quick actions and the
+  // respond_now shortcut. Defined below processWithAI, which it depends on.
 
   // Start continuous recording manually
   const startContinuousRecording = useCallback(async () => {
@@ -437,6 +553,14 @@ export function useSystemAudio() {
         selectedAudioDevices.output.id !== "default"
           ? selectedAudioDevices.output.id
           : null;
+
+      // Fork: the Rust side refuses to start while a capture task is still
+      // registered ("Capture already running"), and a session that ended by
+      // any path other than ignoreContinuousRecording - a prior VAD session,
+      // an aborted send, a reload mid-recording - leaves one behind. The VAD
+      // path in startCapture already clears it first; manual start did not,
+      // so it failed until the app was restarted. stop is idempotent.
+      await invoke<string>("stop_system_audio_capture");
 
       // Start a new continuous recording session
       await invoke<string>("start_system_audio_capture", {
@@ -472,13 +596,25 @@ export function useSystemAudio() {
     async (
       transcription: string,
       prompt: string,
-      previousMessages: Message[]
+      previousMessages: Message[],
+      // Fork: manual triggers pass an instruction, not speech. Persisting it
+      // would title the conversation with the instruction and feed it back as
+      // context on every later call, so those callers opt out.
+      persistUserMessage: boolean = true,
+      // Fork: mark this exchange exempt from the auto-answer context window.
+      // Set for typed turns, which stay relevant however old they get.
+      pinned: boolean = false
     ) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
 
-      abortControllerRef.current = new AbortController();
+      // Fork: keep a local handle. abortControllerRef is overwritten by any
+      // later call, so this is the only reliable way for this invocation to
+      // tell whether it was superseded.
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      isRespondingRef.current = true;
 
       try {
         setIsAIProcessing(true);
@@ -509,6 +645,10 @@ export function useSystemAudio() {
             history: previousMessages,
             userMessage: transcription,
             imagesBase64: [],
+            // Fork: the signal was built and aborted but never passed, so the
+            // abort above did nothing - every overlapping request ran to
+            // completion and wrote its own answer.
+            signal: controller.signal,
           })) {
             fullResponse += chunk;
             setLastAIResponse((prev) => prev + chunk);
@@ -517,38 +657,177 @@ export function useSystemAudio() {
           setError(aiError.message || "Failed to get AI response");
         }
 
-        if (fullResponse) {
+        // Fork: a superseded request must not persist its partial answer.
+        if (fullResponse && !controller.signal.aborted) {
           const timestamp = Date.now();
+          const assistantMessage = {
+            id: generateMessageId("assistant", timestamp + 1),
+            role: "assistant" as const,
+            content: fullResponse,
+            timestamp: timestamp + 1,
+            // The reply to a pinned turn is pinned too - keeping the briefing
+            // but dropping the acknowledgement of it would leave a dangling
+            // half-exchange in the history.
+            ...(pinned ? { pinned: true } : {}),
+          };
+          const newMessages = persistUserMessage
+            ? [
+                {
+                  id: generateMessageId("user", timestamp),
+                  role: "user" as const,
+                  content: transcription,
+                  timestamp,
+                  ...(pinned ? { pinned: true } : {}),
+                },
+                assistantMessage,
+              ]
+            : [assistantMessage];
+
           setConversation((prev) => ({
             ...prev,
-            messages: [
-              {
-                id: generateMessageId("user", timestamp),
-                role: "user" as const,
-                content: transcription,
-                timestamp,
-              },
-              {
-                id: generateMessageId("assistant", timestamp + 1),
-                role: "assistant" as const,
-                content: fullResponse,
-                timestamp: timestamp + 1,
-              },
-              ...prev.messages,
-            ],
+            messages: [...newMessages, ...prev.messages],
             updatedAt: timestamp,
-            title: prev.title || generateConversationTitle(transcription),
+            title: persistUserMessage
+              ? prev.title || generateConversationTitle(transcription)
+              : prev.title,
           }));
         }
       } catch (err) {
         setError("Failed to get AI response");
       } finally {
         setIsAIProcessing(false);
-        // No auto-restart - user manually controls when to start next recording
+        isRespondingRef.current = false;
+        // Fork: speech that arrived while this answer was streaming queued a
+        // follow-up rather than cancelling it. Run it now, against the fuller
+        // transcript. Re-arming the timer (rather than firing immediately)
+        // keeps the same pause rule if the speaker is still talking.
+        if (pendingAutoRespondRef.current) {
+          pendingAutoRespondRef.current = false;
+          scheduleAutoResponse();
+        }
       }
     },
-    [selectedAIProvider, allAiProviders, conversation.messages]
+    [
+      selectedAIProvider,
+      allAiProviders,
+      conversation.messages,
+      scheduleAutoResponse,
+    ]
   );
+
+  // Fork: single path for every manual trigger - quick actions and the
+  // respond_now shortcut. Transcripts already land in the conversation as they
+  // arrive, so this only has to replay them with the requested instruction.
+  const runPrompt = useCallback(
+    async (
+      prompt: string,
+      options: {
+        fullTranscript?: boolean;
+        persist?: boolean;
+        pinned?: boolean;
+      } = {}
+    ) => {
+      const {
+        fullTranscript = false,
+        persist = false,
+        pinned = false,
+      } = options;
+      // Fork: a global shortcut repeats while held, and each repeat used to
+      // start another answer. One request at a time - later triggers are
+      // ignored until the current one finishes rather than stacking.
+      if (isRespondingRef.current) {
+        return;
+      }
+      setError("");
+
+      const effectiveSystemPrompt = useSystemPrompt
+        ? systemPrompt || DEFAULT_SYSTEM_PROMPT
+        : contextContent || DEFAULT_SYSTEM_PROMPT;
+
+      // Fork: bound the transcript sent to the model. Listen mode can run for
+      // an hour, and replaying all of it on every answer is expensive, slow,
+      // and actively worse - the answer wanted is to what was just said, and
+      // it ends up buried under everything before it. Keep only the last
+      // context_window_minutes; 0 means no limit.
+      //
+      // A typed question is the exception and passes useFullTranscript. It is
+      // deliberate and can refer to anything ("what did she ask at the
+      // start?"), so windowing it would break exactly what it is for. It is
+      // also user-initiated and therefore rare, so the cost is bounded.
+      const windowMinutes = fullTranscript
+        ? 0
+        : vadConfig.context_window_minutes ?? DEFAULT_CONTEXT_WINDOW_MINUTES;
+      const cutoff =
+        windowMinutes > 0 ? Date.now() - windowMinutes * 60_000 : 0;
+
+      // conversation.messages is stored newest-first, but buildDynamicMessages
+      // splices history into the request as-is - without this reverse the model
+      // reads the conversation backwards.
+      // Pinned turns survive the window: what makes a message worth keeping is
+      // what kind it is, not how old. Trimming a briefing by age would leave
+      // the model agreeing to instructions it can no longer see.
+      const previousMessages = [...conversation.messages]
+        .filter((msg) => msg.pinned || msg.timestamp >= cutoff)
+        .reverse()
+        .map((msg) => ({ role: msg.role, content: msg.content }));
+
+      await processWithAI(
+        prompt,
+        effectiveSystemPrompt,
+        previousMessages,
+        persist,
+        pinned
+      );
+    },
+    [
+      vadConfig.context_window_minutes,
+      useSystemPrompt,
+      systemPrompt,
+      contextContent,
+      conversation.messages,
+      processWithAI,
+    ]
+  );
+
+  const handleQuickActionClick = async (action: string) => {
+    await runPrompt(action);
+  };
+
+  // Fork: a question the user typed. Two things set it apart from the presets
+  // and respond_now, which mean "answer what was just said":
+  //
+  // fullTranscript - it can refer to any point in the call, so windowing it
+  // would break what it is for.
+  //
+  // persist - it is a real user turn and is kept in the conversation. The
+  // synthetic instructions are not, since "Respond now" as a transcript line
+  // would be noise. This matters most before an interview starts: briefing the
+  // model ("this is a backend role, focus on system design") is only useful if
+  // the briefing is still there on later turns, not just the reply to it.
+  const askAboutTranscript = useCallback(
+    (question: string) =>
+      runPrompt(question, {
+        fullTranscript: true,
+        persist: true,
+        pinned: true,
+      }),
+    [runPrompt]
+  );
+
+  // Fork: answer on demand using everything transcribed so far.
+  //
+  // If speech is still being captured or transcribed, wait for it. The VAD
+  // holds a segment open for a full Silence Duration after the speaker stops,
+  // and STT runs after that, so for several seconds the newest utterance is
+  // not in the conversation. Answering immediately would answer the previous
+  // question - which is what made a single press look like it was one behind.
+  const requestResponse = useCallback(() => {
+    if (speechInFlightRef.current || sttInFlightRef.current) {
+      pendingManualRespondRef.current = true;
+      return;
+    }
+    return runPrompt(RESPOND_NOW_PROMPT);
+  }, [runPrompt]);
 
   const startCapture = useCallback(async () => {
     try {
@@ -612,6 +891,9 @@ export function useSystemAudio() {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      // Fork: drop any armed or queued auto-answer - the user has stopped
+      // listening, so a pending timer must not fire a request afterwards.
+      cancelAutoResponse();
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
@@ -632,7 +914,7 @@ export function useSystemAudio() {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [cancelAutoResponse]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {
@@ -708,14 +990,35 @@ export function useSystemAudio() {
     });
   }, [startCapture, stopCapture]);
 
+  // Fork: respond_now is dispatched by the Rust custom_action branch, so it
+  // needs no native handler - only a callback registered against its id.
+  // requestResponse changes identity on every new message, so it is held in a
+  // ref and the callback registered once - re-registering per message would
+  // repeat the churn that broke the speech listener.
+  useEffect(() => {
+    requestResponseRef.current = () => {
+      void requestResponse();
+    };
+  }, [requestResponse]);
+
+  useEffect(() => {
+    globalShortcuts.registerCustomShortcutCallback("respond_now", () => {
+      void requestResponseRef.current();
+    });
+    return () => {
+      globalShortcuts.unregisterCustomShortcutCallback("respond_now");
+    };
+  }, []);
+
   useEffect(() => {
     return () => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      cancelAutoResponse();
       invoke("stop_system_audio_capture").catch(() => {});
     };
-  }, []);
+  }, [cancelAutoResponse]);
 
   // Debounced save to prevent race conditions and improve performance
   useEffect(() => {
@@ -787,10 +1090,33 @@ export function useSystemAudio() {
       setVadConfig(config);
       safeLocalStorage.setItem("vad_config", JSON.stringify(config));
       await invoke("update_vad_config", { config });
+
+      // Fork: start_system_audio_capture clones the VAD config before it
+      // spawns the capture task, so a running session keeps the values it
+      // started with - update_vad_config only affects the next one. Editing
+      // Silence Duration mid-session therefore appeared to do nothing, with
+      // no error to explain why. Restart the capture so the edit takes hold.
+      // Only the audio side needs this; auto_respond_silence_ms is read live
+      // on the frontend, so a delay-only change skips the restart.
+      if (capturingRef.current && config.enabled) {
+        await invoke("stop_system_audio_capture");
+        const deviceId =
+          selectedAudioDevices.output.id !== "default"
+            ? selectedAudioDevices.output.id
+            : null;
+        await invoke("start_system_audio_capture", {
+          vadConfig: config,
+          deviceId,
+        });
+      }
     } catch (error) {
       console.error("Failed to update VAD config:", error);
     }
-  }, []);
+  }, [selectedAudioDevices.output.id]);
+
+  useEffect(() => {
+    capturingRef.current = capturing;
+  }, [capturing]);
 
   useEffect(() => {
     if (capturing) {
@@ -912,6 +1238,9 @@ export function useSystemAudio() {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    askAboutTranscript,
+    // Fork: manual "answer now" trigger for Listen mode
+    requestResponse,
     // VAD configuration
     vadConfig,
     updateVadConfiguration,

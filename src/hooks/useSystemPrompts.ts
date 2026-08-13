@@ -80,6 +80,15 @@ export const useSystemPrompts = () => {
         setError(null);
         const result = await updateSystemPrompt(id, input);
         await fetchPrompts(); // Refresh list
+        // Fork: the active prompt is mirrored into localStorage, but only
+        // handleSelectPrompt wrote it - so editing the prompt that is already
+        // selected left the mirror holding the pre-edit text until the next
+        // launch resynced it. Requests built from the mirror in that window
+        // used the stale version.
+        if (id === selectedPromptId && result.prompt) {
+          setSystemPrompt(result.prompt);
+          safeLocalStorage.setItem(STORAGE_KEYS.SYSTEM_PROMPT, result.prompt);
+        }
         return result;
       } catch (err) {
         const errorMessage =
@@ -89,7 +98,7 @@ export const useSystemPrompts = () => {
         throw err;
       }
     },
-    [fetchPrompts]
+    [fetchPrompts, selectedPromptId, setSystemPrompt]
   );
 
   /**
