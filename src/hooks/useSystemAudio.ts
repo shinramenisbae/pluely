@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useApp } from "@/contexts";
 import { fetchSTT, fetchAIResponse } from "@/lib/functions";
 import {
+  AUTO_RESPOND_SILENCE_MS,
   DEFAULT_QUICK_ACTIONS,
   DEFAULT_SYSTEM_PROMPT,
   RESPOND_NOW_PROMPT,
@@ -111,9 +112,45 @@ export function useSystemAudio() {
   // Fork: guards against overlapping manual triggers (see runPrompt). A ref,
   // not state, so a repeated keypress sees the current value immediately.
   const isRespondingRef = useRef(false);
+  // Fork: auto-answer scheduling. Each transcript pushes the timer back, so the
+  // model runs once the speaker actually stops rather than once per segment.
+  // pendingAutoRespondRef records a pause that landed while an answer was
+  // already streaming - that answer is never aborted, the next one runs after.
+  const autoRespondTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingAutoRespondRef = useRef(false);
+  // Declared here rather than beside requestResponse: the speech listener is
+  // defined earlier in this hook and reaches it through the ref.
+  const requestResponseRef = useRef<() => void>(() => {});
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const isSavingRef = useRef<boolean>(false);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+
+  // Fork: (re)arm the auto-answer timer. Called on every transcript, so a
+  // speaker who keeps going keeps pushing the answer back. Stable identity -
+  // it only touches refs - so the speech listener never re-registers for it.
+  const scheduleAutoResponse = useCallback(() => {
+    if (autoRespondTimerRef.current) {
+      clearTimeout(autoRespondTimerRef.current);
+    }
+    autoRespondTimerRef.current = setTimeout(() => {
+      autoRespondTimerRef.current = null;
+      if (isRespondingRef.current) {
+        // An answer is still streaming. Don't abort it - queue instead, and
+        // processWithAI will pick this up when it finishes.
+        pendingAutoRespondRef.current = true;
+        return;
+      }
+      requestResponseRef.current();
+    }, AUTO_RESPOND_SILENCE_MS);
+  }, []);
+
+  const cancelAutoResponse = useCallback(() => {
+    if (autoRespondTimerRef.current) {
+      clearTimeout(autoRespondTimerRef.current);
+      autoRespondTimerRef.current = null;
+    }
+    pendingAutoRespondRef.current = false;
+  }, []);
 
   // Load context settings and VAD config from localStorage on mount
   useEffect(() => {
@@ -306,6 +343,10 @@ export function useSystemAudio() {
                   title:
                     prev.title || generateConversationTitle(transcription),
                 }));
+
+                // Fork: answer once the speaker pauses. Re-armed per segment,
+                // so a multi-sentence question is answered as one question.
+                scheduleAutoResponse();
               } else {
                 setError("Received empty transcription");
               }
@@ -343,7 +384,7 @@ export function useSystemAudio() {
     // request for the same audio - producing duplicate transcripts and hammering
     // the STT provider's rate limit. The handler only writes via the
     // setConversation updater, so it never needed to read the conversation.
-  }, [capturing, selectedSttProvider, allSttProviders]);
+  }, [capturing, selectedSttProvider, allSttProviders, scheduleAutoResponse]);
 
   // Context management functions
   const saveContextSettings = useCallback(
@@ -561,10 +602,22 @@ export function useSystemAudio() {
       } finally {
         setIsAIProcessing(false);
         isRespondingRef.current = false;
-        // No auto-restart - user manually controls when to start next recording
+        // Fork: speech that arrived while this answer was streaming queued a
+        // follow-up rather than cancelling it. Run it now, against the fuller
+        // transcript. Re-arming the timer (rather than firing immediately)
+        // keeps the same pause rule if the speaker is still talking.
+        if (pendingAutoRespondRef.current) {
+          pendingAutoRespondRef.current = false;
+          scheduleAutoResponse();
+        }
       }
     },
-    [selectedAIProvider, allAiProviders, conversation.messages]
+    [
+      selectedAIProvider,
+      allAiProviders,
+      conversation.messages,
+      scheduleAutoResponse,
+    ]
   );
 
   // Fork: single path for every manual trigger - quick actions and the
@@ -679,6 +732,9 @@ export function useSystemAudio() {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      // Fork: drop any armed or queued auto-answer - the user has stopped
+      // listening, so a pending timer must not fire a request afterwards.
+      cancelAutoResponse();
 
       // Stop the audio capture
       await invoke<string>("stop_system_audio_capture");
@@ -699,7 +755,7 @@ export function useSystemAudio() {
       setError(`Failed to stop capture: ${errorMessage}`);
       console.error("Stop capture error:", err);
     }
-  }, []);
+  }, [cancelAutoResponse]);
 
   // Manual stop for continuous recording
   const manualStopAndSend = useCallback(async () => {
@@ -780,9 +836,10 @@ export function useSystemAudio() {
   // requestResponse changes identity on every new message, so it is held in a
   // ref and the callback registered once - re-registering per message would
   // repeat the churn that broke the speech listener.
-  const requestResponseRef = useRef(requestResponse);
   useEffect(() => {
-    requestResponseRef.current = requestResponse;
+    requestResponseRef.current = () => {
+      void requestResponse();
+    };
   }, [requestResponse]);
 
   useEffect(() => {
@@ -799,9 +856,10 @@ export function useSystemAudio() {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
       }
+      cancelAutoResponse();
       invoke("stop_system_audio_capture").catch(() => {});
     };
-  }, []);
+  }, [cancelAutoResponse]);
 
   // Debounced save to prevent race conditions and improve performance
   useEffect(() => {

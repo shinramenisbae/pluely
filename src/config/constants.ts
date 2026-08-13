@@ -31,6 +31,13 @@ export const MAX_FILES = 6;
 export const DEFAULT_SYSTEM_PROMPT =
   "You are a helpful AI assistant. Be concise, accurate, and friendly in your responses";
 
+// Fork: how long Listen mode waits after the last transcript before answering
+// on its own. Speech arrives one VAD segment at a time, so answering per
+// segment cuts the speaker off mid-thought; waiting for a real pause lets a
+// multi-sentence question arrive whole. Raise it for speakers who pause a lot,
+// lower it for snappier replies.
+export const AUTO_RESPOND_SILENCE_MS = 1500;
+
 // Fork: instruction sent when the user asks Listen mode for an answer. The
 // transcript is already in the conversation history, so this only has to say
 // what to do with it.
