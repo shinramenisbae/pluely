@@ -136,6 +136,12 @@ export function useSystemAudio() {
   const autoRespondTimerRef = useRef<NodeJS.Timeout | null>(null);
   const pendingAutoRespondRef = useRef(false);
   const autoRespondDelayRef = useRef(AUTO_RESPOND_SILENCE_MS);
+  // Fork: speech is being captured or transcribed right now, so the newest
+  // utterance is not in the conversation yet. Used to defer a manual answer
+  // until it lands rather than answering without it.
+  const speechInFlightRef = useRef(false);
+  const sttInFlightRef = useRef(false);
+  const pendingManualRespondRef = useRef(false);
   // Mirrors `capturing` for callbacks that must stay stable (updateVadConfiguration
   // is passed to the settings panel; re-creating it on every capture toggle
   // would churn the panel's handlers).
@@ -182,6 +188,7 @@ export function useSystemAudio() {
       autoRespondTimerRef.current = null;
     }
     pendingAutoRespondRef.current = false;
+    pendingManualRespondRef.current = false;
   }, []);
 
   // Keep the delay the scheduler reads in step with the setting. A timer
@@ -247,6 +254,7 @@ export function useSystemAudio() {
     let stopUnlisten: (() => void) | undefined;
     let errorUnlisten: (() => void) | undefined;
     let discardedUnlisten: (() => void) | undefined;
+    let speechStartUnlisten: (() => void) | undefined;
 
     const setupContinuousListeners = async () => {
       try {
@@ -278,10 +286,26 @@ export function useSystemAudio() {
           setIsRecordingInContinuousMode(false);
         });
 
+        // Fork: speech has started but the segment has not closed yet. The VAD
+        // only closes it after a full Silence Duration of quiet, and STT runs
+        // after that - so for several seconds after the speaker stops, what
+        // they just said is not in the conversation yet. Respond now pressed in
+        // that gap used to answer without it, which read as answering the
+        // previous question and needing a second press.
+        speechStartUnlisten = await listen("speech-start", () => {
+          speechInFlightRef.current = true;
+        });
+
         // Speech discarded (too short)
         discardedUnlisten = await listen("speech-discarded", (event) => {
           const reason = event.payload as string;
           console.log("Speech discarded:", reason);
+          // Nothing will be transcribed, so a waiting request must not hang.
+          speechInFlightRef.current = false;
+          if (pendingManualRespondRef.current) {
+            pendingManualRespondRef.current = false;
+            requestResponseRef.current();
+          }
           // Don't show error - this is expected behavior
         });
       } catch (err) {
@@ -297,6 +321,7 @@ export function useSystemAudio() {
       if (stopUnlisten) stopUnlisten();
       if (errorUnlisten) errorUnlisten();
       if (discardedUnlisten) discardedUnlisten();
+      if (speechStartUnlisten) speechStartUnlisten();
     };
   }, []);
 
@@ -339,6 +364,7 @@ export function useSystemAudio() {
             }
 
             setIsProcessing(true);
+            sttInFlightRef.current = true;
 
             // Add timeout wrapper for STT request (30 seconds)
             const sttPromise = fetchSTT({
@@ -390,6 +416,16 @@ export function useSystemAudio() {
                 // Fork: answer once the speaker pauses. Re-armed per segment,
                 // so a multi-sentence question is answered as one question.
                 scheduleAutoResponse();
+
+                // Fork: a manual answer was requested while this utterance was
+                // still being captured or transcribed. It is in the
+                // conversation now, so run the answer the user actually asked
+                // for - the one that includes what was just said.
+                if (pendingManualRespondRef.current) {
+                  pendingManualRespondRef.current = false;
+                  cancelAutoResponse();
+                  requestResponseRef.current();
+                }
               } else {
                 setError("Received empty transcription");
               }
@@ -402,6 +438,14 @@ export function useSystemAudio() {
             setError("Failed to process speech");
           } finally {
             setIsProcessing(false);
+            sttInFlightRef.current = false;
+            speechInFlightRef.current = false;
+            // Transcription failed or produced nothing, so the release above
+            // never ran. Don't leave a requested answer waiting forever.
+            if (pendingManualRespondRef.current) {
+              pendingManualRespondRef.current = false;
+              requestResponseRef.current();
+            }
           }
         });
 
@@ -771,10 +815,19 @@ export function useSystemAudio() {
   );
 
   // Fork: answer on demand using everything transcribed so far.
-  const requestResponse = useCallback(
-    () => runPrompt(RESPOND_NOW_PROMPT),
-    [runPrompt]
-  );
+  //
+  // If speech is still being captured or transcribed, wait for it. The VAD
+  // holds a segment open for a full Silence Duration after the speaker stops,
+  // and STT runs after that, so for several seconds the newest utterance is
+  // not in the conversation. Answering immediately would answer the previous
+  // question - which is what made a single press look like it was one behind.
+  const requestResponse = useCallback(() => {
+    if (speechInFlightRef.current || sttInFlightRef.current) {
+      pendingManualRespondRef.current = true;
+      return;
+    }
+    return runPrompt(RESPOND_NOW_PROMPT);
+  }, [runPrompt]);
 
   const startCapture = useCallback(async () => {
     try {
