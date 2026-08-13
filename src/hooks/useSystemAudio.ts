@@ -145,6 +145,13 @@ export function useSystemAudio() {
     // Read through a ref: this callback must keep a stable identity (the
     // speech listener depends on it), so it cannot close over vadConfig.
     const delay = autoRespondDelayRef.current;
+    // Fork: 0 means "never answer on its own". Transcripts still accumulate,
+    // and Respond now (or Ctrl+Shift+Enter) answers against all of them - the
+    // whole conversation is sent as history, so speech split across several
+    // segments is still answered as one question.
+    if (delay <= 0) {
+      return;
+    }
     autoRespondTimerRef.current = setTimeout(() => {
       autoRespondTimerRef.current = null;
       if (isRespondingRef.current) {

@@ -351,10 +351,12 @@ export const SettingsPanel = ({
                       <Label className="text-xs font-medium flex items-center justify-between">
                         <span>Response Delay</span>
                         <span className="text-muted-foreground font-normal">
-                          {(
-                            (vadConfig.auto_respond_silence_ms ?? 1500) / 1000
-                          ).toFixed(1)}
-                          s
+                          {(vadConfig.auto_respond_silence_ms ?? 1500) === 0
+                            ? "Off - manual"
+                            : `${(
+                                (vadConfig.auto_respond_silence_ms ?? 1500) /
+                                1000
+                              ).toFixed(1)}s`}
                         </span>
                       </Label>
                       <Slider
@@ -365,14 +367,15 @@ export const SettingsPanel = ({
                             auto_respond_silence_ms: Math.round(value),
                           })
                         }
-                        min={500}
+                        min={0}
                         max={8000}
                         step={250}
                         className="w-full"
                       />
                       <p className="text-[10px] text-muted-foreground">
-                        Quiet time before answering on its own. Raise it if
-                        answers cut in while the speaker is still talking.
+                        {(vadConfig.auto_respond_silence_ms ?? 1500) === 0
+                          ? "Never answers on its own. Speech keeps accumulating; press Respond now (Ctrl+Shift+Enter) to answer all of it at once."
+                          : "Quiet time before answering on its own. Slide to 0 for manual-only if answers keep cutting in mid-question."}
                       </p>
                     </div>
                   </>
