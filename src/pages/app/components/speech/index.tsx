@@ -58,6 +58,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    askAboutTranscript,
     requestResponse,
     vadConfig,
     updateVadConfiguration,
@@ -414,7 +415,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
                     const question = askInput.trim();
                     if (!question || isAIProcessing || isProcessing) return;
                     setAskInput("");
-                    handleQuickActionClick(question);
+                    askAboutTranscript(question);
                   }}
                   className="flex items-center gap-1.5"
                 >

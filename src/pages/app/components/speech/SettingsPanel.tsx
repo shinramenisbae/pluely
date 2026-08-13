@@ -382,7 +382,7 @@ export const SettingsPanel = ({
 
                     <div className="space-y-2">
                       <Label className="text-xs font-medium flex items-center justify-between">
-                        <span>Transcript Context</span>
+                        <span>Auto-answer Context</span>
                         <span className="text-muted-foreground font-normal">
                           {(vadConfig.context_window_minutes ?? 5) === 0
                             ? "Whole conversation"
@@ -403,9 +403,10 @@ export const SettingsPanel = ({
                         className="w-full"
                       />
                       <p className="text-[10px] text-muted-foreground">
-                        How much of the transcript is sent with each answer. A
-                        long call is mostly background - a short window keeps
-                        the answer focused on the recent question.
+                        Transcript sent with Respond now, quick actions and
+                        auto-answers, so they stay focused on what was just
+                        said. Questions you type always use the whole
+                        transcript.
                       </p>
                     </div>
                   </>

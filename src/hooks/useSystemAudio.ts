@@ -660,7 +660,7 @@ export function useSystemAudio() {
   // respond_now shortcut. Transcripts already land in the conversation as they
   // arrive, so this only has to replay them with the requested instruction.
   const runPrompt = useCallback(
-    async (prompt: string) => {
+    async (prompt: string, useFullTranscript: boolean = false) => {
       // Fork: a global shortcut repeats while held, and each repeat used to
       // start another answer. One request at a time - later triggers are
       // ignored until the current one finishes rather than stacking.
@@ -675,11 +675,17 @@ export function useSystemAudio() {
 
       // Fork: bound the transcript sent to the model. Listen mode can run for
       // an hour, and replaying all of it on every answer is expensive, slow,
-      // and actively worse - the question the user wants answered is a few
-      // lines at the end, buried under everything said before it. Keep only
-      // what was said in the last context_window_minutes. 0 means no limit.
-      const windowMinutes =
-        vadConfig.context_window_minutes ?? DEFAULT_CONTEXT_WINDOW_MINUTES;
+      // and actively worse - the answer wanted is to what was just said, and
+      // it ends up buried under everything before it. Keep only the last
+      // context_window_minutes; 0 means no limit.
+      //
+      // A typed question is the exception and passes useFullTranscript. It is
+      // deliberate and can refer to anything ("what did she ask at the
+      // start?"), so windowing it would break exactly what it is for. It is
+      // also user-initiated and therefore rare, so the cost is bounded.
+      const windowMinutes = useFullTranscript
+        ? 0
+        : vadConfig.context_window_minutes ?? DEFAULT_CONTEXT_WINDOW_MINUTES;
       const cutoff =
         windowMinutes > 0 ? Date.now() - windowMinutes * 60_000 : 0;
 
@@ -711,6 +717,14 @@ export function useSystemAudio() {
   const handleQuickActionClick = async (action: string) => {
     await runPrompt(action);
   };
+
+  // Fork: a question the user typed. Unlike the presets and respond_now -
+  // which mean "answer what was just said" and are windowed accordingly - this
+  // gets the whole transcript, because it can refer to any point in the call.
+  const askAboutTranscript = useCallback(
+    (question: string) => runPrompt(question, true),
+    [runPrompt]
+  );
 
   // Fork: answer on demand using everything transcribed so far.
   const requestResponse = useCallback(
@@ -1127,6 +1141,7 @@ export function useSystemAudio() {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    askAboutTranscript,
     // Fork: manual "answer now" trigger for Listen mode
     requestResponse,
     // VAD configuration
