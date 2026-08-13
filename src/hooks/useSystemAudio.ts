@@ -660,7 +660,11 @@ export function useSystemAudio() {
   // respond_now shortcut. Transcripts already land in the conversation as they
   // arrive, so this only has to replay them with the requested instruction.
   const runPrompt = useCallback(
-    async (prompt: string, useFullTranscript: boolean = false) => {
+    async (
+      prompt: string,
+      options: { fullTranscript?: boolean; persist?: boolean } = {}
+    ) => {
+      const { fullTranscript = false, persist = false } = options;
       // Fork: a global shortcut repeats while held, and each repeat used to
       // start another answer. One request at a time - later triggers are
       // ignored until the current one finishes rather than stacking.
@@ -683,7 +687,7 @@ export function useSystemAudio() {
       // deliberate and can refer to anything ("what did she ask at the
       // start?"), so windowing it would break exactly what it is for. It is
       // also user-initiated and therefore rare, so the cost is bounded.
-      const windowMinutes = useFullTranscript
+      const windowMinutes = fullTranscript
         ? 0
         : vadConfig.context_window_minutes ?? DEFAULT_CONTEXT_WINDOW_MINUTES;
       const cutoff =
@@ -701,7 +705,7 @@ export function useSystemAudio() {
         prompt,
         effectiveSystemPrompt,
         previousMessages,
-        false
+        persist
       );
     },
     [
@@ -718,11 +722,19 @@ export function useSystemAudio() {
     await runPrompt(action);
   };
 
-  // Fork: a question the user typed. Unlike the presets and respond_now -
-  // which mean "answer what was just said" and are windowed accordingly - this
-  // gets the whole transcript, because it can refer to any point in the call.
+  // Fork: a question the user typed. Two things set it apart from the presets
+  // and respond_now, which mean "answer what was just said":
+  //
+  // fullTranscript - it can refer to any point in the call, so windowing it
+  // would break what it is for.
+  //
+  // persist - it is a real user turn and is kept in the conversation. The
+  // synthetic instructions are not, since "Respond now" as a transcript line
+  // would be noise. This matters most before an interview starts: briefing the
+  // model ("this is a backend role, focus on system design") is only useful if
+  // the briefing is still there on later turns, not just the reply to it.
   const askAboutTranscript = useCallback(
-    (question: string) => runPrompt(question, true),
+    (question: string) => runPrompt(question, { fullTranscript: true, persist: true }),
     [runPrompt]
   );
 

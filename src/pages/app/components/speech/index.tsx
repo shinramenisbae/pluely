@@ -390,19 +390,22 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 keyboard shortcut (respond_now) did this from the start, but an
                 invisible shortcut is not a discoverable feature. Shown whenever
                 something has been transcribed and no answer is in flight. */}
-            {!setupRequired && capturing && hasTranscript && (
+            {!setupRequired && capturing && (
               <div className="flex-shrink-0 border-t border-border/50 p-2 space-y-2">
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="w-full gap-2"
-                  onClick={requestResponse}
-                  disabled={isAIProcessing || isProcessing}
-                  title="Answer using everything transcribed so far (Ctrl+Shift+Enter)"
-                >
-                  <SparklesIcon className="size-3.5" />
-                  {isAIProcessing ? "Responding..." : "Respond now"}
-                </Button>
+                {/* Needs something to answer; the input below does not. */}
+                {hasTranscript && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="w-full gap-2"
+                    onClick={requestResponse}
+                    disabled={isAIProcessing || isProcessing}
+                    title="Answer using everything transcribed so far (Ctrl+Shift+Enter)"
+                  >
+                    <SparklesIcon className="size-3.5" />
+                    {isAIProcessing ? "Responding..." : "Respond now"}
+                  </Button>
+                )}
 
                 {/* Fork: ask about the transcript in your own words. The quick
                     actions already proved the path - they hand a string to
@@ -422,7 +425,11 @@ export const SystemAudio = (props: useSystemAudioType) => {
                   <Input
                     value={askInput}
                     onChange={(e) => setAskInput(e.target.value)}
-                    placeholder="Ask about the transcript..."
+                    placeholder={
+                      hasTranscript
+                        ? "Ask about the transcript..."
+                        : "Brief the AI before you start..."
+                    }
                     className="h-8 text-xs"
                     disabled={isAIProcessing || isProcessing}
                   />
