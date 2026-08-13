@@ -64,6 +64,13 @@ interface ChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
   timestamp: number;
+  // Fork: set on turns the user deliberately typed, and on the answers to
+  // them. The auto-answer context window trims by age, which is right for
+  // speech - a transcript line from twenty minutes ago is usually noise - but
+  // wrong for these: a briefing ("this is a backend interview, keep answers
+  // short") does not stop applying because it got old. Pinned messages are
+  // exempt from the window and always sent.
+  pinned?: boolean;
 }
 
 // Conversation interface (reusing from useCompletion)
@@ -549,7 +556,10 @@ export function useSystemAudio() {
       // Fork: manual triggers pass an instruction, not speech. Persisting it
       // would title the conversation with the instruction and feed it back as
       // context on every later call, so those callers opt out.
-      persistUserMessage: boolean = true
+      persistUserMessage: boolean = true,
+      // Fork: mark this exchange exempt from the auto-answer context window.
+      // Set for typed turns, which stay relevant however old they get.
+      pinned: boolean = false
     ) => {
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -611,6 +621,10 @@ export function useSystemAudio() {
             role: "assistant" as const,
             content: fullResponse,
             timestamp: timestamp + 1,
+            // The reply to a pinned turn is pinned too - keeping the briefing
+            // but dropping the acknowledgement of it would leave a dangling
+            // half-exchange in the history.
+            ...(pinned ? { pinned: true } : {}),
           };
           const newMessages = persistUserMessage
             ? [
@@ -619,6 +633,7 @@ export function useSystemAudio() {
                   role: "user" as const,
                   content: transcription,
                   timestamp,
+                  ...(pinned ? { pinned: true } : {}),
                 },
                 assistantMessage,
               ]
@@ -662,9 +677,17 @@ export function useSystemAudio() {
   const runPrompt = useCallback(
     async (
       prompt: string,
-      options: { fullTranscript?: boolean; persist?: boolean } = {}
+      options: {
+        fullTranscript?: boolean;
+        persist?: boolean;
+        pinned?: boolean;
+      } = {}
     ) => {
-      const { fullTranscript = false, persist = false } = options;
+      const {
+        fullTranscript = false,
+        persist = false,
+        pinned = false,
+      } = options;
       // Fork: a global shortcut repeats while held, and each repeat used to
       // start another answer. One request at a time - later triggers are
       // ignored until the current one finishes rather than stacking.
@@ -696,8 +719,11 @@ export function useSystemAudio() {
       // conversation.messages is stored newest-first, but buildDynamicMessages
       // splices history into the request as-is - without this reverse the model
       // reads the conversation backwards.
+      // Pinned turns survive the window: what makes a message worth keeping is
+      // what kind it is, not how old. Trimming a briefing by age would leave
+      // the model agreeing to instructions it can no longer see.
       const previousMessages = [...conversation.messages]
-        .filter((msg) => msg.timestamp >= cutoff)
+        .filter((msg) => msg.pinned || msg.timestamp >= cutoff)
         .reverse()
         .map((msg) => ({ role: msg.role, content: msg.content }));
 
@@ -705,7 +731,8 @@ export function useSystemAudio() {
         prompt,
         effectiveSystemPrompt,
         previousMessages,
-        persist
+        persist,
+        pinned
       );
     },
     [
@@ -734,7 +761,12 @@ export function useSystemAudio() {
   // model ("this is a backend role, focus on system design") is only useful if
   // the briefing is still there on later turns, not just the reply to it.
   const askAboutTranscript = useCallback(
-    (question: string) => runPrompt(question, { fullTranscript: true, persist: true }),
+    (question: string) =>
+      runPrompt(question, {
+        fullTranscript: true,
+        persist: true,
+        pinned: true,
+      }),
     [runPrompt]
   );
 
