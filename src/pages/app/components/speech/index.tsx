@@ -13,6 +13,7 @@ import {
   AudioLinesIcon,
   CameraIcon,
   PlusIcon,
+  SparklesIcon,
   XIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -55,6 +56,7 @@ export const SystemAudio = (props: useSystemAudioType) => {
     showQuickActions,
     setShowQuickActions,
     handleQuickActionClick,
+    requestResponse,
     vadConfig,
     updateVadConfiguration,
     isRecordingInContinuousMode,
@@ -76,6 +78,10 @@ export const SystemAudio = (props: useSystemAudioType) => {
 
   const isVadMode = vadConfig.enabled;
   const hasResponse = lastAIResponse || isAIProcessing;
+  // Something has been said that the model could answer. Transcripts land in
+  // the conversation as user messages, so that - not lastTranscription, which
+  // only holds the most recent segment - is the real signal.
+  const hasTranscript = conversation.messages.some((m) => m.role === "user");
 
   // Keyboard shortcut for Cmd+K to toggle view mode
   useEffect(() => {
@@ -373,6 +379,26 @@ export const SystemAudio = (props: useSystemAudioType) => {
                 )}
               </div>
             </ScrollArea>
+
+            {/* Fork: answer now, without waiting out the response delay. The
+                keyboard shortcut (respond_now) did this from the start, but an
+                invisible shortcut is not a discoverable feature. Shown whenever
+                something has been transcribed and no answer is in flight. */}
+            {!setupRequired && capturing && hasTranscript && (
+              <div className="flex-shrink-0 border-t border-border/50 p-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="w-full gap-2"
+                  onClick={requestResponse}
+                  disabled={isAIProcessing || isProcessing}
+                  title="Answer using everything transcribed so far (Ctrl+Shift+Enter)"
+                >
+                  <SparklesIcon className="size-3.5" />
+                  {isAIProcessing ? "Responding..." : "Respond now"}
+                </Button>
+              </div>
+            )}
 
             {/* Quick Actions */}
             {!setupRequired && hasResponse && (
